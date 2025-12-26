@@ -1,0 +1,7 @@
+{
+  "name": "Smart Exam Management System",
+  "description": "A comprehensive smart system for managing exam envelopes, tracking student attendance, and providing real-time analytics for school administration.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
