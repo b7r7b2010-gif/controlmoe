@@ -13,14 +13,12 @@ const firebaseConfig = {
 
 /**
  * تهيئة تطبيق Firebase باستخدام نمط Singleton.
- * يضمن هذا الكود عدم محاولة إعادة تهيئة التطبيق في حال كان مهيأً مسبقاً،
- * وهو أمر حيوي في بيئات React التي تدعم التحديث اللحظي (HMR).
+ * يضمن هذا الكود عدم محاولة إعادة تهيئة التطبيق في حال كان مهيأً مسبقاً.
  */
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
 /**
- * الحصول على مثيل Firestore.
- * نمرر مثيل 'app' الموحد إلى getFirestore لضمان ربطه بتهيئة Firebase الصحيحة.
+ * تهيئة Firestore صراحة كما هو مطلوب وتصديرها.
  */
 const db = getFirestore(app);
 

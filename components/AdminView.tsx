@@ -1,326 +1,466 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ExamEnvelope, EnvelopeStatus, Notification, Teacher, UserRole, Student } from '../types';
+
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { ExamEnvelope, EnvelopeStatus, Teacher, UserRole, Student } from '../types';
 import { db } from '../lib/firebase';
-import { collection, getDocs, setDoc, doc, writeBatch, updateDoc, deleteDoc } from 'firebase/firestore';
-import { generateSmartReport } from '../services/geminiService';
+import { collection, getDocs, setDoc, doc, writeBatch, deleteDoc, onSnapshot, updateDoc, query, where, deleteField } from 'firebase/firestore';
 import { 
-  ClipboardList, Users, BookOpen, Scan, MapPin, 
-  CheckCircle2, Calendar, QrCode, LayoutDashboard, 
-  AlertCircle, Users2, Activity, Bell, FileSpreadsheet, Filter, Camera,
-  Printer, Clock, Settings, X, Check, Info, Sparkles, GraduationCap, ToggleRight, ToggleLeft,
-  Loader2, FileText
+  Users, QrCode, Sparkles, Trash2, Printer, Settings, Plus, 
+  Table as TableIcon, FileText, Layers, CheckCircle2, 
+  RefreshCw, Eye, FileSpreadsheet, Download, Trash, MoreVertical,
+  ShieldCheck, Save, Edit3, MapPin, MessageCircle, Clock, Calendar as CalendarIcon,
+  X, ChevronRight, GraduationCap, AlertCircle
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
-interface ScheduleSession {
+type AdminTab = 'students' | 'distribution' | 'invigilators' | 'printing';
+
+interface ScheduleSlot {
   id: string;
   date: string;
-  period: 'الأولى' | 'الثانية';
-  startTime: string;
-  endTime: string;
+  period: 'الفترة الأولى' | 'الفترة الثانية';
+  from: string;
+  to: string;
   subject: string;
-  isActive: boolean;
 }
 
-interface AdminViewProps {
-  role: UserRole;
-  envelopes: ExamEnvelope[];
-  notifications: Notification[];
-}
-
-const AdminView: React.FC<AdminViewProps> = ({ role, envelopes, notifications }) => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'committees' | 'teachers' | 'students' | 'alerts'>(role === 'MANAGER' ? 'dashboard' : 'committees');
-  const [dbTeachers, setDbTeachers] = useState<Teacher[]>([]);
-  const [isImporting, setIsImporting] = useState(false);
-  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
-  const [smartReport, setSmartReport] = useState<string | null>(null);
-  const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [importType, setImportType] = useState<'teachers' | 'envelopes' | null>(null);
+const AdminView: React.FC<{ role: UserRole; envelopes: ExamEnvelope[] }> = ({ role, envelopes }) => {
+  const [activeTab, setActiveTab] = useState<AdminTab>('invigilators');
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
   
-  const [startDate, setStartDate] = useState('2025-12-26');
-  const [sessions, setSessions] = useState<ScheduleSession[]>([]);
+  // Schedule State
+  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
+  const [schedule, setSchedule] = useState<ScheduleSlot[]>([
+    { id: '1', date: '', period: 'الفترة الأولى', from: '07:30', to: '10:00', subject: 'رياضيات' },
+    { id: '2', date: '', period: 'الفترة الثانية', from: '10:30', to: '12:30', subject: 'كفايات لغوية' },
+    { id: '3', date: '', period: 'الفترة الأولى', from: '07:30', to: '10:00', subject: 'لغة إنجليزية' },
+  ]);
 
+  const [importStep, setImportStep] = useState<'idle' | 'teacher_mapping' | 'student_mapping'>('idle');
+  const [sheetHeaders, setSheetHeaders] = useState<string[]>([]);
+  const [rawSheetData, setRawSheetData] = useState<any[]>([]);
+  const [mapping, setMapping] = useState<any>({});
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Real-time Sync
   useEffect(() => {
-    if (activeTab === 'teachers') {
-      getDocs(collection(db, 'teachers')).then(snap => setDbTeachers(snap.docs.map(doc => doc.data() as Teacher)));
-    }
-  }, [activeTab]);
+    const unsubTeachers = onSnapshot(collection(db, 'teachers'), (snap) => {
+      setTeachers(snap.docs.map(doc => doc.data() as Teacher));
+    });
+    const unsubStudents = onSnapshot(collection(db, 'students'), (snap) => {
+      setStudents(snap.docs.map(doc => doc.data() as Student));
+    });
+    return () => { unsubTeachers(); unsubStudents(); };
+  }, []);
 
-  const handleSmartReport = async () => {
-    setIsGeneratingReport(true);
-    try {
-      const report = await generateSmartReport(envelopes);
-      setSmartReport(report);
-    } catch (error) {
-      alert("تعذر إنشاء التقرير حالياً.");
-    } finally {
-      setIsGeneratingReport(false);
-    }
-  };
+  // Auto-calculate schedule dates
+  useEffect(() => {
+    const newSchedule = schedule.map((slot, index) => {
+      const d = new Date(startDate);
+      const dayOffset = Math.floor(index / 2);
+      d.setDate(d.getDate() + dayOffset);
+      return { ...slot, date: d.toISOString().split('T')[0] };
+    });
+    setSchedule(newSchedule);
+  }, [startDate]);
 
-  const getGradeStyle = (grade: string) => {
-    const g = grade.toLowerCase();
-    if (g.includes('أول')) return 'border-blue-200 bg-blue-50 text-blue-700';
-    if (g.includes('ثان')) return 'border-indigo-200 bg-indigo-50 text-indigo-700';
-    if (g.includes('ثالث')) return 'border-purple-200 bg-purple-50 text-purple-700';
-    return 'border-slate-200 bg-slate-50 text-slate-700';
-  };
+  const activeCommittees = useMemo(() => 
+    envelopes.filter(e => e.id.startsWith('COM_'))
+      .sort((a, b) => parseInt(a.committee) - parseInt(b.committee)), 
+  [envelopes]);
 
-  const initSessions = (baseDate: string) => {
-    const newSessions: ScheduleSession[] = [];
-    const subjects = ['رياضيات', 'كفايات لغوية', 'لغة إنجليزية', 'كيمياء', 'فيزياء'];
-    for (let i = 0; i < 5; i++) {
-      const date = new Date(baseDate);
-      date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().split('T')[0];
-      newSessions.push({
-        id: `s-${i}-1`, date: dateStr, period: 'الأولى', startTime: '07:30', endTime: '10:00', subject: subjects[i] || '', isActive: true
-      });
-      newSessions.push({
-        id: `s-${i}-2`, date: dateStr, period: 'الثانية', startTime: '10:30', endTime: '12:30', subject: '', isActive: i === 0 
-      });
-    }
-    setSessions(newSessions);
-  };
-
-  const handleExcelUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'teachers' | 'envelopes') => {
+  // --- Functions ---
+  
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'teachers' | 'students') => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setIsImporting(true);
     const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        const data = new Uint8Array(event.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: 'array' });
-        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet);
-        const batch = writeBatch(db);
-        if (type === 'teachers') {
-          jsonData.forEach((row: any) => {
-            const id = String(row['رقم المعلم'] || row['رقم الموظف'] || '');
-            const name = String(row['اسم المعلم'] || '');
-            if (id && name) batch.set(doc(db, 'teachers', id), { id, name, phone: String(row['الجوال'] || ''), qrCode: `T_${id}`, committees: [] });
-          });
-        } else {
-          const committeesMap = new Map<string, ExamEnvelope>();
-          jsonData.forEach((row: any) => {
-            const committeeNum = String(row['اللجنة'] || row['رقم اللجنة'] || '1');
-            const student: Student = {
-              id: String(row['رقم الجلوس'] || ''), name: String(row['اسم الطالب'] || ''), grade: String(row['الصف'] || ''), classroom: String(row['الفصل'] || ''), phone: String(row['رقم الجوال'] || ''), status: 'pending', photo: ''
-            };
-            if (!committeesMap.has(committeeNum)) {
-              committeesMap.set(committeeNum, { id: `TEMP_${committeeNum}`, qrCode: `QR_${committeeNum}`, subject: 'بانتظار الجدولة', committee: committeeNum, venue: String(row['المقر'] || 'القاعة'), startTime: '--:--', endTime: '--:--', date: 'غير مجدول', status: 'بانتظار الجدولة', students: [student] });
-            } else committeesMap.get(committeeNum)?.students.push(student);
-          });
-          committeesMap.forEach(env => batch.set(doc(db, 'envelopes', env.id), env));
-        }
-        await batch.commit();
-        alert("تم استيراد البيانات!");
-        if (type === 'envelopes') setShowScheduleModal(true);
-      } catch (err) { alert("خطأ في قراءة الملف."); } finally { setIsImporting(false); }
+    reader.onload = (evt) => {
+      const bstr = evt.target?.result;
+      const wb = XLSX.read(bstr, { type: 'binary' });
+      const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+      if (data.length > 0) {
+        setRawSheetData(data);
+        setSheetHeaders(Object.keys(data[0] as object));
+        setImportStep(type === 'teachers' ? 'teacher_mapping' : 'student_mapping');
+      }
     };
-    reader.readAsArrayBuffer(file);
+    reader.readAsBinaryString(file);
   };
 
-  const generateEnvelopesFromSchedule = async () => {
-    setIsImporting(true);
+  const clearAllTeachers = async () => {
+    if (!window.confirm("سيتم حذف جميع المعلمين وتصفير التكليفات نهائياً. هل أنت متأكد؟")) return;
+    setIsProcessing(true);
     try {
-      const activeSessions = sessions.filter(s => s.isActive && s.subject);
-      const templates = envelopes.filter(e => e.id.startsWith('TEMP_'));
       const batch = writeBatch(db);
-      activeSessions.forEach(session => {
-        templates.forEach(template => {
-          const newId = `ENV_${session.id}_${template.committee}`;
-          batch.set(doc(db, 'envelopes', newId), { ...template, id: newId, subject: session.subject, date: session.date, startTime: session.startTime, endTime: session.endTime, status: EnvelopeStatus.NOT_RECEIVED, period: `الفترة ${session.period}` });
-        });
-      });
-      templates.forEach(t => batch.delete(doc(db, 'envelopes', t.id)));
+      const tSnap = await getDocs(collection(db, 'teachers'));
+      tSnap.docs.forEach(d => batch.delete(d.ref));
+      
+      const eSnap = await getDocs(collection(db, 'envelopes'));
+      eSnap.docs.forEach(d => batch.update(d.ref, { teacherId: deleteField(), teacherName: deleteField() }));
+      
       await batch.commit();
-      setShowScheduleModal(false);
-    } catch (error) { alert("خطأ في التوليد."); } finally { setIsImporting(false); }
+      alert("تم الحذف بنجاح.");
+    } catch (e) { alert("حدث خطأ."); }
+    finally { setIsProcessing(false); }
+  };
+
+  const processImport = async (type: 'teachers' | 'students') => {
+    setIsProcessing(true);
+    const batch = writeBatch(db);
+    rawSheetData.forEach((row: any) => {
+      const id = String(row[mapping.id] || '').trim();
+      const name = String(row[mapping.name] || '').trim();
+      if (id && name) {
+        if (type === 'teachers') {
+          batch.set(doc(db, 'teachers', id), { id, name, phone: String(row[mapping.phone] || ''), qrCode: id });
+        } else {
+          batch.set(doc(db, 'students', id), { id, name, grade: String(row[mapping.grade] || ''), classroom: String(row[mapping.classroom] || ''), status: 'pending' });
+        }
+      }
+    });
+    await batch.commit();
+    setImportStep('idle');
+    setIsProcessing(false);
+  };
+
+  const autoDistribute = async () => {
+    if (students.length === 0) return alert("يرجى استيراد الطلاب أولاً.");
+    setIsProcessing(true);
+    const batch = writeBatch(db);
+    const studentsPerCommittee = 20;
+    const totalCommittees = Math.ceil(students.length / studentsPerCommittee);
+
+    // Clear existing committees
+    const oldEnvelopes = await getDocs(collection(db, 'envelopes'));
+    oldEnvelopes.docs.forEach(d => batch.delete(d.ref));
+
+    for (let i = 0; i < totalCommittees; i++) {
+      const start = i * studentsPerCommittee;
+      const committeeStudents = students.slice(start, start + studentsPerCommittee);
+      const committeeId = `COM_${i + 1}`;
+      
+      batch.set(doc(db, 'envelopes', committeeId), {
+        id: committeeId,
+        committee: String(i + 1),
+        qrCode: committeeId,
+        status: EnvelopeStatus.NOT_RECEIVED,
+        students: committeeStudents,
+        venue: `قاعة ${i + 1}`,
+        subject: 'سيتم تحديده من الجدول',
+        startTime: '07:30',
+        endTime: '10:00',
+        date: startDate
+      });
+    }
+    await batch.commit();
+    setIsProcessing(false);
+    alert(`تم توزيع ${students.length} طالب على ${totalCommittees} لجنة.`);
+  };
+
+  const applySchedule = async () => {
+    if (activeCommittees.length === 0) return alert("يرجى توزيع اللجان أولاً.");
+    setIsProcessing(true);
+    const batch = writeBatch(db);
+    const slot = schedule[0];
+    activeCommittees.forEach(comm => {
+      batch.update(doc(db, 'envelopes', comm.id), {
+        date: slot.date,
+        startTime: slot.from,
+        endTime: slot.to,
+        subject: slot.subject,
+        period: slot.period
+      });
+    });
+    await batch.commit();
+    setIsProcessing(false);
+    alert("تم تطبيق الجدول الزمني.");
   };
 
   return (
-    <div className="flex flex-col lg:flex-row gap-8 relative">
-      <input type="file" ref={fileInputRef} className="hidden" accept=".xlsx, .xls" onChange={(e) => importType && handleExcelUpload(e, importType)} />
+    <div className="space-y-10 max-w-[1500px] mx-auto pb-24" dir="rtl">
       
-      {/* Smart Report Modal */}
-      {smartReport && (
-        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-slate-900/70 backdrop-blur-sm" onClick={() => setSmartReport(null)}></div>
-          <div className="relative bg-white w-full max-w-3xl rounded-[40px] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
-            <div className="bg-gradient-to-r from-blue-600 to-indigo-700 p-8 text-white flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <Sparkles className="w-6 h-6" />
-                <h2 className="text-xl font-black">التقرير الذكي لسير الاختبارات</h2>
-              </div>
-              <button onClick={() => setSmartReport(null)} className="hover:bg-white/10 p-2 rounded-xl transition"><X className="w-6 h-6" /></button>
-            </div>
-            <div className="p-10 max-h-[70vh] overflow-y-auto markdown-content">
-              {smartReport.split('\n').map((line, i) => <p key={i}>{line}</p>)}
-            </div>
-            <div className="p-6 border-t flex justify-end gap-4 bg-slate-50">
-              <button onClick={() => window.print()} className="flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-100"><Printer className="w-4 h-4" /> طباعة التقرير</button>
-              <button onClick={() => setSmartReport(null)} className="px-8 py-3 bg-slate-800 text-white rounded-xl text-sm font-bold">إغلاق</button>
-            </div>
+      {/* Tab Navigation */}
+      <div className="bg-white/80 p-2 rounded-[35px] flex justify-center gap-2 backdrop-blur-2xl border border-white sticky top-20 z-40 shadow-xl shadow-slate-200/50">
+        {[
+          { id: 'students', label: 'الطلاب', icon: Users },
+          { id: 'distribution', label: 'توزيع اللجان', icon: TableIcon },
+          { id: 'invigilators', label: 'الملاحظين والجدول', icon: ShieldCheck },
+          { id: 'printing', label: 'الطباعة', icon: Printer }
+        ].map(t => (
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id as AdminTab)}
+            className={`flex items-center gap-2 px-8 py-3 rounded-2xl font-black transition-all ${activeTab === t.id ? 'bg-[#00b5ad] text-white shadow-lg' : 'text-slate-400 hover:bg-slate-50'}`}
+          >
+            <t.icon className="w-5 h-5" />
+            <span className="text-sm">{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {isProcessing && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md z-[100] flex items-center justify-center">
+          <div className="bg-white p-12 rounded-[50px] shadow-3xl flex flex-col items-center gap-6">
+            <RefreshCw className="w-12 h-12 text-[#00b5ad] animate-spin" />
+            <p className="font-black text-slate-800 text-xl tracking-tighter">جاري تنفيذ الأوامر...</p>
           </div>
         </div>
       )}
 
-      {showScheduleModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" onClick={() => setShowScheduleModal(false)}></div>
-          <div className="relative bg-[#f1f5f9] w-full max-w-5xl rounded-[32px] shadow-3xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="bg-[#1e293b] p-6 text-white flex justify-between items-center shrink-0">
-               <div className="flex items-center gap-4">
-                  <Settings className="w-6 h-6 text-blue-400" />
-                  <h2 className="text-xl font-black">إعداد جدول الاختبارات</h2>
-               </div>
-               <button onClick={() => setShowScheduleModal(false)} className="hover:bg-white/10 p-2 rounded-xl transition"><X className="w-6 h-6" /></button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
-              <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
-                 <label className="text-xs font-black text-slate-500 block mb-3">تاريخ بداية الاختبارات</label>
-                 <input type="date" value={startDate} onChange={(e) => { setStartDate(e.target.value); initSessions(e.target.value); }} className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-6 font-bold" />
-              </div>
-              <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden">
-                <table className="w-full text-right text-sm">
-                  <thead className="bg-slate-50 text-slate-400 font-black border-b">
-                    <tr><th className="p-4">التاريخ</th><th className="p-4">الفترة</th><th className="p-4">المادة</th><th className="p-4 text-center">تنشيط</th></tr>
-                  </thead>
-                  <tbody>
-                    {sessions.map((s) => (
-                      <tr key={s.id} className={!s.isActive ? 'opacity-40' : ''}>
-                        <td className="p-4">{s.date}</td>
-                        <td className="p-4">الفترة {s.period}</td>
-                        <td className="p-4"><input type="text" value={s.subject} onChange={(e) => setSessions(prev => prev.map(x => x.id === s.id ? {...x, subject: e.target.value} : x))} className="bg-transparent border-b w-full" /></td>
-                        <td className="p-4 text-center"><button onClick={() => setSessions(prev => prev.map(x => x.id === s.id ? {...x, isActive: !x.isActive} : x))}>{s.isActive ? <ToggleRight className="text-green-500" /> : <ToggleLeft />}</button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <div className="p-6 bg-white border-t flex justify-center"><button onClick={generateEnvelopesFromSchedule} className="bg-blue-600 text-white px-12 py-4 rounded-2xl font-black">اعتماد المظاريف</button></div>
-          </div>
-        </div>
-      )}
-
-      <aside className="lg:w-72 shrink-0">
-        <div className="bg-white/80 backdrop-blur-xl rounded-[32px] shadow-xl border border-white sticky top-24 p-3 space-y-2">
-          {navItems.map((item) => (
-            <button key={item.id} onClick={() => setActiveTab(item.id as any)} className={`w-full flex items-center gap-4 px-6 py-4 rounded-2xl transition-all ${activeTab === item.id ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-50'}`}>
-              <item.icon className="w-5 h-5" /><span className="text-sm font-bold">{item.label}</span>
-            </button>
-          ))}
-        </div>
-      </aside>
-
-      <div className="flex-1 space-y-8">
-        {activeTab === 'dashboard' && (
-          <div className="space-y-8">
-            <div className="bg-gradient-to-br from-[#0086d1] to-[#00a8ff] rounded-[48px] p-10 text-white shadow-2xl relative overflow-hidden">
-                <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
-                  <div>
-                    <h2 className="text-3xl font-black">مرحباً بك في لوحة القيادة</h2>
-                    <p className="opacity-80 mt-2 font-bold">النظام الذكي يحلل البيانات لحظياً لضمان سير الاختبارات.</p>
-                  </div>
-                  <button 
-                    onClick={handleSmartReport}
-                    disabled={isGeneratingReport}
-                    className="bg-white text-blue-600 px-8 py-4 rounded-2xl font-black flex items-center gap-3 shadow-xl hover:scale-105 transition disabled:opacity-50"
-                  >
-                    {isGeneratingReport ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-                    توليد تقرير ذكي (Gemini)
-                  </button>
+      {/* Invigilators Tab (Schedule & Teachers) */}
+      {activeTab === 'invigilators' && (
+        <div className="space-y-12 animate-in fade-in">
+           {/* Section 1: Schedule Configuration */}
+           <div className="bg-white p-10 md:p-14 rounded-[55px] shadow-2xl border border-slate-100/50">
+              <div className="flex flex-col md:flex-row justify-between items-end gap-8 mb-14">
+                <div className="text-right space-y-3">
+                   <h3 className="text-3xl font-black text-slate-800 tracking-tighter">تاريخ بداية الاختبارات</h3>
+                   <p className="text-sm text-slate-400 font-bold">تغيير هذا التاريخ سيقوم بإعادة حساب تواريخ الجدول أدناه تلقائياً.</p>
                 </div>
-                <div className="absolute top-0 left-0 w-64 h-64 bg-white/10 rounded-full -translate-x-1/2 -translate-y-1/2"></div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {[
-                { label: 'المظاريف المعتمدة', val: envelopes.filter(e => !e.id.startsWith('TEMP_')).length, color: 'bg-blue-600', icon: ClipboardList },
-                { label: 'الطلاب المسجلين', val: envelopes.reduce((acc, e) => acc + e.students.length, 0), color: 'bg-indigo-600', icon: Users2 },
-                { label: 'الحضور المباشر', val: envelopes.reduce((acc, e) => acc + e.students.filter(s => s.status === 'present').length, 0), color: 'bg-green-600', icon: Activity },
-                { label: 'الغياب المرصود', val: envelopes.reduce((acc, e) => acc + e.students.filter(s => s.status === 'absent').length, 0), color: 'bg-red-600', icon: AlertCircle },
-              ].map((stat, i) => (
-                <div key={i} className="bg-white p-8 rounded-[40px] shadow-sm border border-white flex items-center justify-between group hover:shadow-md transition-all">
-                  <div className="text-right"><p className="text-[10px] text-slate-400 font-black mb-1 uppercase tracking-widest">{stat.label}</p><p className="text-4xl font-black text-slate-800">{stat.val}</p></div>
-                  <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white ${stat.color}`}><stat.icon className="w-7 h-7" /></div>
+                <div className="relative w-full md:w-[400px]">
+                   <CalendarIcon className="absolute right-6 top-1/2 -translate-y-1/2 w-7 h-7 text-slate-300" />
+                   <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full bg-slate-50 border-2 border-slate-100 rounded-[30px] py-6 pr-16 pl-8 font-black text-2xl outline-none focus:border-[#00b5ad]" />
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'students' && (
-           <div className="bg-white rounded-[48px] shadow-sm border border-white overflow-hidden">
-              <div className="p-10 border-b flex justify-between items-center bg-slate-50/30">
-                 <div>
-                    <h2 className="text-2xl font-black text-slate-800">سجل الطلاب والفرز العام</h2>
-                    <p className="text-xs text-slate-400 font-bold mt-1 tracking-tight flex items-center gap-2"><GraduationCap className="w-4 h-4" /> فرز تلقائي حسب المرحلة</p>
-                 </div>
               </div>
-              <div className="overflow-x-auto">
+
+              <div className="rounded-[45px] border border-slate-100 overflow-hidden shadow-sm bg-white">
                  <table className="w-full text-right">
-                    <thead className="bg-slate-50 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b">
-                       <tr><th className="p-8">رقم الجلوس</th><th className="p-8">اسم الطالب</th><th className="p-8">الصف</th><th className="p-8">اللجنة</th><th className="p-8">الحالة</th></tr>
+                    <thead className="bg-slate-50 font-black text-slate-500 text-sm">
+                       <tr>
+                          <th className="p-8 text-center">التاريخ</th>
+                          <th className="p-8">الفترة</th>
+                          <th className="p-8 text-center">من</th>
+                          <th className="p-8 text-center">إلى</th>
+                          <th className="p-8">المادة</th>
+                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
-                       {envelopes.flatMap(env => env.students.map(s => (
-                         <tr key={s.id} className="hover:bg-blue-50/10 transition-colors">
-                            <td className="p-8 font-mono font-black text-blue-600">#{s.id}</td>
-                            <td className="p-8 font-black text-slate-700">{s.name}</td>
-                            <td className="p-8"><span className={`px-4 py-2 rounded-xl text-xs font-black border ${getGradeStyle(s.grade)}`}>{s.grade}</span></td>
-                            <td className="p-8"><span className="bg-slate-100 px-4 py-2 rounded-xl font-black text-xs">لجنة {env.committee}</span></td>
-                            <td className="p-8"><span className={`px-4 py-2 rounded-xl text-[10px] font-black ${s.status === 'present' ? 'bg-green-50 text-green-600' : s.status === 'absent' ? 'bg-red-50 text-red-600' : 'bg-slate-50 text-slate-400'}`}>{s.status === 'present' ? 'حاضر' : s.status === 'absent' ? 'غائب' : 'لم يحضر'}</span></td>
-                         </tr>
-                       )))}
+                       {schedule.map((slot, idx) => (
+                          <tr key={slot.id} className="hover:bg-blue-50/20 transition-all">
+                             <td className="p-8">
+                                <div className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                                   <CalendarIcon className="w-5 h-5 text-slate-300" />
+                                   <span className="font-black text-slate-600 text-lg">{new Date(slot.date).toLocaleDateString('ar-SA')}</span>
+                                </div>
+                             </td>
+                             <td className="p-8 font-black text-slate-800 text-2xl">{slot.period}</td>
+                             <td className="p-8">
+                                <div className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 justify-center">
+                                   <Clock className="w-5 h-5 text-slate-300" />
+                                   <input type="text" value={slot.from} className="bg-transparent border-none w-20 text-center font-black text-xl outline-none" onChange={e => {
+                                      const n = [...schedule]; n[idx].from = e.target.value; setSchedule(n);
+                                   }} />
+                                   <span className="text-xs font-black text-slate-400">ص</span>
+                                </div>
+                             </td>
+                             <td className="p-8">
+                                <div className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 justify-center">
+                                   <Clock className="w-5 h-5 text-slate-300" />
+                                   <input type="text" value={slot.to} className="bg-transparent border-none w-20 text-center font-black text-xl outline-none" onChange={e => {
+                                      const n = [...schedule]; n[idx].to = e.target.value; setSchedule(n);
+                                   }} />
+                                   <span className="text-xs font-black text-slate-400">ص</span>
+                                </div>
+                             </td>
+                             <td className="p-8">
+                                <input type="text" value={slot.subject} placeholder="المادة..." className="w-full bg-transparent border-none font-bold text-slate-400 text-xl outline-none" onChange={e => {
+                                    const n = [...schedule]; n[idx].subject = e.target.value; setSchedule(n);
+                                }} />
+                             </td>
+                          </tr>
+                       ))}
                     </tbody>
                  </table>
               </div>
+              <div className="flex justify-end gap-5 mt-10">
+                 <button onClick={clearAllTeachers} className="bg-red-50 text-red-600 px-8 py-5 rounded-[24px] font-black flex items-center gap-4 hover:bg-red-600 hover:text-white transition-all">
+                    <Trash2 className="w-6 h-6" /> مسح المعلمين نهائياً
+                 </button>
+                 <button onClick={applySchedule} className="bg-slate-900 text-white px-14 py-5 rounded-[24px] font-black text-xl shadow-2xl">اعتماد المواعيد</button>
+              </div>
            </div>
-        )}
 
-        {activeTab === 'committees' && (
-           <div className="space-y-8">
-              <div className="bg-white/80 backdrop-blur-md p-10 rounded-[48px] shadow-sm border border-white flex flex-col lg:flex-row justify-between items-center gap-8">
-                 <div className="text-right space-y-2">
-                    <h2 className="text-3xl font-black text-slate-800">إدارة اللجان والجدولة</h2>
-                    <p className="text-slate-400 font-medium tracking-tight">استورد ملف اللجان أولاً، ثم قم بإعداد الجدول.</p>
-                 </div>
-                 <div className="flex flex-wrap justify-center gap-4">
-                    <button onClick={() => { setImportType('envelopes'); fileInputRef.current?.click(); }} className="flex items-center gap-3 bg-blue-600 text-white px-8 py-4 rounded-2xl text-sm font-black shadow-lg transition hover:-translate-y-1"><FileSpreadsheet className="w-5 h-5" /> استيراد اللجان</button>
-                    {envelopes.some(e => e.id.startsWith('TEMP_')) && (
-                      <button onClick={() => { initSessions(startDate); setShowScheduleModal(true); }} className="flex items-center gap-3 bg-indigo-600 text-white px-8 py-4 rounded-2xl text-sm font-black shadow-lg transition hover:-translate-y-1"><Calendar className="w-5 h-5" /> إعداد الجدول</button>
-                    )}
-                 </div>
+           {/* Section 2: Teacher List */}
+           <div className="bg-white rounded-[55px] shadow-sm border border-slate-100 overflow-hidden">
+              <div className="p-10 bg-slate-50/30 flex justify-between items-center border-b border-slate-50">
+                 <h2 className="text-3xl font-black text-slate-800 tracking-tighter">كادر الملاحظين ({teachers.length})</h2>
+                 <button onClick={() => { setMapping({}); fileInputRef.current?.click(); }} className="bg-[#0086d1] text-white px-10 py-5 rounded-[24px] font-black shadow-lg flex items-center gap-4">
+                   <FileSpreadsheet className="w-6 h-6" /> استيراد المعلمين
+                 </button>
+                 <input type="file" ref={fileInputRef} className="hidden" accept=".xlsx,.xls" onChange={e => handleFileUpload(e, 'teachers')} />
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                 {envelopes.filter(e => !e.id.startsWith('TEMP_')).map(env => (
-                   <div key={env.id} className="bg-white p-8 rounded-[40px] border border-slate-100 shadow-sm hover:shadow-xl transition-all group">
-                      <div className="space-y-6">
-                         <div className="flex justify-between items-center"><div className="bg-blue-600 text-white px-5 py-1.5 rounded-xl font-black text-xs">لجنة {env.committee}</div><QrCode className="text-slate-200 group-hover:text-blue-600 transition-colors w-8 h-8" /></div>
-                         <div><h4 className="text-xl font-black text-slate-800">{env.subject}</h4><p className="text-[10px] text-slate-400 font-black mt-2 flex items-center gap-2"><MapPin className="w-3 h-3" /> {env.venue} | {env.students.length} طالب</p></div>
-                         <div className="flex gap-3"><div className={`flex-1 py-3 rounded-2xl text-center text-[10px] font-black border ${env.status === EnvelopeStatus.SUBMITTED_TO_CONTROL ? 'bg-green-50 text-green-600 border-green-100' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>{env.status}</div><button className="p-3 bg-slate-50 text-slate-400 rounded-xl hover:bg-blue-600 hover:text-white transition-all"><Printer className="w-5 h-5" /></button></div>
-                      </div>
+
+              {importStep === 'teacher_mapping' && (
+                <div className="m-10 p-10 bg-blue-50 rounded-[40px] border-4 border-white shadow-xl space-y-10">
+                   <h3 className="text-2xl font-black">مطابقة أعمدة المعلمين</h3>
+                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      {['id', 'name', 'phone'].map(f => (
+                         <div key={f} className="space-y-3">
+                            <label className="text-xs font-black text-blue-400 uppercase tracking-widest">{f === 'id' ? 'الرقم الوظيفي' : f === 'name' ? 'الاسم' : 'الجوال'}</label>
+                            <select className="w-full bg-white border-none rounded-2xl p-5 font-black text-slate-700 shadow-sm" onChange={e => setMapping({...mapping, [f]: e.target.value})}>
+                               <option value="">-- اختر --</option>
+                               {sheetHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                            </select>
+                         </div>
+                      ))}
                    </div>
-                 ))}
+                   <button onClick={() => processImport('teachers')} className="w-full bg-blue-600 text-white py-6 rounded-[24px] font-black text-xl">بدء الاستيراد</button>
+                </div>
+              )}
+
+              <table className="w-full text-right">
+                 <thead>
+                    <tr className="bg-white border-b border-slate-50 font-black text-slate-400 text-[11px] uppercase tracking-widest">
+                       <th className="p-10">المعلم</th>
+                       <th className="p-10">الرقم الوظيفي</th>
+                       <th className="p-10">التكليفات</th>
+                       <th className="p-10">تواصل</th>
+                    </tr>
+                 </thead>
+                 <tbody className="divide-y divide-slate-50">
+                    {teachers.map(t => (
+                       <tr key={t.id} className="hover:bg-slate-50/50 transition-all">
+                          <td className="p-10 font-black text-xl text-slate-800">{t.name}</td>
+                          <td className="p-10 font-black text-slate-400 text-lg">#{t.id}</td>
+                          <td className="p-10">
+                             <div className="flex flex-wrap gap-2">
+                                {activeCommittees.filter(c => c.teacherId === t.id).map(c => (
+                                   <span key={c.id} className="bg-blue-50 text-blue-600 px-4 py-2 rounded-xl text-xs font-black">لجنة {c.committee}</span>
+                                ))}
+                             </div>
+                          </td>
+                          <td className="p-10">
+                             <button className="p-4 bg-green-50 text-green-600 rounded-2xl hover:bg-green-600 hover:text-white transition-all shadow-sm"><MessageCircle className="w-6 h-6" /></button>
+                          </td>
+                       </tr>
+                    ))}
+                 </tbody>
+              </table>
+           </div>
+        </div>
+      )}
+
+      {/* Students Tab */}
+      {activeTab === 'students' && (
+        <div className="space-y-12 animate-in fade-in">
+           <div className="bg-white p-12 rounded-[55px] shadow-2xl border border-slate-100 flex justify-between items-center">
+              <div className="space-y-2">
+                 <h2 className="text-4xl font-black text-slate-800 tracking-tighter">إدارة الطلاب ({students.length})</h2>
+                 <p className="text-slate-400 font-bold">استورد قائمة الطلاب من ملف إكسل لتوزيعهم على اللجان</p>
+              </div>
+              <button onClick={() => { setMapping({}); fileInputRef.current?.click(); }} className="bg-blue-600 text-white px-10 py-5 rounded-[24px] font-black shadow-lg flex items-center gap-4">
+                 <FileSpreadsheet className="w-6 h-6" /> استيراد الطلاب (Excel)
+              </button>
+              <input type="file" ref={fileInputRef} className="hidden" accept=".xlsx,.xls" onChange={e => handleFileUpload(e, 'students')} />
+           </div>
+
+           {importStep === 'student_mapping' && (
+             <div className="bg-white p-14 rounded-[55px] shadow-2xl border-4 border-blue-50 space-y-12">
+                <h3 className="text-2xl font-black text-blue-900">تخطيط أعمدة ملف الطلاب</h3>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                   {['id', 'name', 'grade', 'classroom'].map(f => (
+                      <div key={f} className="space-y-3">
+                         <label className="text-xs font-black text-blue-400 uppercase tracking-widest">{f === 'id' ? 'رقم الجلوس' : f === 'name' ? 'الاسم' : f === 'grade' ? 'الصف' : 'الفصل'}</label>
+                         <select className="w-full bg-slate-50 border-none rounded-2xl p-5 font-black text-slate-700 outline-none" onChange={e => setMapping({...mapping, [f]: e.target.value})}>
+                            <option value="">-- اختر --</option>
+                            {sheetHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                         </select>
+                      </div>
+                   ))}
+                </div>
+                <button onClick={() => processImport('students')} className="w-full bg-blue-600 text-white py-6 rounded-[24px] font-black text-2xl shadow-xl">تأكيد الاستيراد</button>
+             </div>
+           )}
+
+           <div className="bg-white rounded-[55px] shadow-sm border border-slate-100 overflow-hidden">
+              <table className="w-full text-right">
+                 <thead className="bg-slate-50 font-black text-slate-400 text-[11px] uppercase tracking-widest">
+                    <tr>
+                       <th className="p-10">الطالب</th>
+                       <th className="p-10">رقم الجلوس</th>
+                       <th className="p-10">الصف / الفصل</th>
+                       <th className="p-10">الحالة</th>
+                    </tr>
+                 </thead>
+                 <tbody className="divide-y divide-slate-50">
+                    {students.map(s => (
+                       <tr key={s.id} className="hover:bg-slate-50 transition-all">
+                          <td className="p-10 font-black text-xl text-slate-800">{s.name}</td>
+                          <td className="p-10 font-black text-slate-400 text-lg">#{s.id}</td>
+                          <td className="p-10 font-bold text-slate-500">{s.grade} - {s.classroom}</td>
+                          <td className="p-10">
+                             <span className="bg-slate-100 text-slate-400 px-4 py-2 rounded-xl text-xs font-black">في الانتظار</span>
+                          </td>
+                       </tr>
+                    ))}
+                 </tbody>
+              </table>
+           </div>
+        </div>
+      )}
+
+      {/* Distribution Tab */}
+      {activeTab === 'distribution' && (
+        <div className="space-y-12 animate-in fade-in">
+           <div className="bg-white p-14 rounded-[60px] shadow-2xl border border-slate-50 text-center space-y-8">
+              <div className="w-32 h-32 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto shadow-inner border-4 border-white"><TableIcon className="w-16 h-16"/></div>
+              <div className="space-y-4">
+                 <h2 className="text-4xl font-black text-slate-800 tracking-tighter">محرك التوزيع الذكي</h2>
+                 <p className="text-slate-400 font-bold text-xl max-w-2xl mx-auto">سيقوم النظام بتوزيع {students.length} طالب على لجان الاختبار بمعدل 20 طالباً لكل لجنة مع إنشاء المظاريف آلياً.</p>
+              </div>
+              <div className="flex justify-center gap-6">
+                 <button onClick={autoDistribute} className="bg-slate-900 text-white px-14 py-6 rounded-[30px] font-black text-xl shadow-2xl hover:scale-105 transition flex items-center gap-4">
+                    <Sparkles className="w-6 h-6 text-yellow-400" /> بدء التوزيع الآلي
+                 </button>
               </div>
            </div>
-        )}
-      </div>
+
+           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+              {activeCommittees.map(comm => (
+                 <div key={comm.id} className="bg-white p-8 rounded-[45px] shadow-sm border border-slate-100 space-y-6 hover:shadow-xl transition-all border-r-8 border-r-[#00b5ad]">
+                    <div className="flex justify-between items-center">
+                       <span className="bg-slate-900 text-white px-5 py-2 rounded-2xl font-black text-lg">لجنة {comm.committee}</span>
+                       <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">#{comm.id}</span>
+                    </div>
+                    <div className="space-y-3">
+                       <p className="font-black text-xl text-slate-800">{comm.venue}</p>
+                       <p className="text-slate-400 font-bold text-sm">عدد الطلاب: <span className="text-[#00b5ad]">{comm.students.length} طالب</span></p>
+                    </div>
+                    <div className="pt-4 border-t border-slate-50 flex items-center gap-3">
+                       <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600"><Clock className="w-5 h-5" /></div>
+                       <p className="text-sm font-black text-slate-600">{comm.startTime} - {comm.endTime}</p>
+                    </div>
+                 </div>
+              ))}
+           </div>
+        </div>
+      )}
+
+      {/* Printing Tab */}
+      {activeTab === 'printing' && (
+        <div className="space-y-12 animate-in fade-in">
+           <div className="bg-white p-14 rounded-[60px] shadow-2xl border border-slate-100 text-center space-y-8">
+              <div className="w-32 h-32 bg-slate-900 text-white rounded-full flex items-center justify-center mx-auto"><Printer className="w-16 h-16"/></div>
+              <h2 className="text-4xl font-black text-slate-800 tracking-tighter">مركز الطباعة والتقارير</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                 <button className="bg-blue-50 p-10 rounded-[40px] border-2 border-blue-100 flex flex-col items-center gap-6 hover:bg-blue-600 hover:text-white transition-all group">
+                    <QrCode className="w-12 h-12 text-blue-600 group-hover:text-white" />
+                    <span className="text-2xl font-black">ملصقات باركود اللجان</span>
+                 </button>
+                 <button className="bg-orange-50 p-10 rounded-[40px] border-2 border-orange-100 flex flex-col items-center gap-6 hover:bg-orange-600 hover:text-white transition-all group">
+                    <FileText className="w-12 h-12 text-orange-600 group-hover:text-white" />
+                    <span className="text-2xl font-black">كشوف تحضير الطلاب</span>
+                 </button>
+              </div>
+           </div>
+        </div>
+      )}
+
     </div>
   );
 };
-
-const navItems = [
-  { id: 'dashboard', label: 'لوحة المتابعة', icon: LayoutDashboard },
-  { id: 'committees', label: 'اللجان والجدولة', icon: ClipboardList },
-  { id: 'teachers', label: 'المعلمون', icon: Users },
-  { id: 'students', label: 'الطلاب والفرز', icon: BookOpen },
-  { id: 'alerts', label: 'التنبيهات', icon: Bell },
-];
 
 export default AdminView;

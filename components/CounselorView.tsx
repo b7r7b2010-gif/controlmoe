@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { ExamEnvelope, Student } from '../types';
-import { Calendar, Search, CheckCircle2, AlertTriangle, PhoneCall } from 'lucide-react';
+import { Calendar, CheckCircle2, PhoneCall, Phone, UserX } from 'lucide-react';
 
 interface CounselorViewProps {
   envelopes: ExamEnvelope[];
@@ -15,51 +15,62 @@ const CounselorView: React.FC<CounselorViewProps> = ({ envelopes }) => {
   );
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="bg-white p-8 rounded-[40px] shadow-sm border border-gray-100 flex flex-col md:flex-row justify-between items-center gap-6">
-        <div className="flex items-center gap-4 text-right">
-          <div className="w-14 h-14 bg-orange-50 text-orange-600 rounded-3xl flex items-center justify-center">
-             <AlertTriangle className="w-8 h-8" />
+    <div className="space-y-8 animate-in fade-in duration-500 max-w-[1200px] mx-auto">
+      <div className="bg-white p-10 rounded-[48px] shadow-sm border border-slate-100 flex flex-col md:flex-row justify-between items-center gap-8">
+        <div className="flex items-center gap-6 text-right">
+          <div className="w-16 h-16 bg-red-50 text-red-600 rounded-[28px] flex items-center justify-center shadow-inner">
+             <UserX className="w-8 h-8" />
           </div>
           <div>
-            <h2 className="text-2xl font-black text-[#1a2b3c]">لوحة متابعة الغياب</h2>
-            <p className="text-sm text-gray-400 font-medium">متابعة فورية للطلاب الغائبين والتواصل مع أولياء الأمور</p>
+            <h2 className="text-3xl font-black text-slate-800">متابعة غياب الطلاب</h2>
+            <p className="text-slate-400 font-bold mt-1 tracking-tight">قائمة الطلاب الغائبين المطلوب التواصل مع أولياء أمورهم</p>
           </div>
         </div>
-        <div className="relative">
-          <Calendar className="w-4 h-4 absolute right-4 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input type="text" value="26/12/2025" className="bg-gray-50 border border-gray-200 rounded-2xl py-3 pr-12 pl-6 text-sm font-black w-48 outline-none focus:ring-4 focus:ring-blue-100" readOnly />
+        <div className="bg-slate-50 border border-slate-100 rounded-3xl p-4 px-8 flex items-center gap-4">
+          <Calendar className="w-5 h-5 text-slate-400" />
+          <span className="font-black text-slate-800 tracking-tighter">{new Date().toLocaleDateString('ar-SA')}</span>
         </div>
       </div>
 
-      <div className="bg-white p-12 rounded-[40px] shadow-sm border border-gray-100 text-center min-h-[400px] flex flex-col items-center justify-center space-y-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         {absentStudents.length === 0 ? (
-          <>
-            <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center text-green-500">
+          <div className="lg:col-span-2 bg-white p-20 rounded-[48px] shadow-sm border border-slate-100 text-center space-y-6">
+            <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center text-green-500 mx-auto">
               <CheckCircle2 className="w-12 h-12" />
             </div>
             <div className="space-y-2">
-              <h3 className="text-2xl font-black text-[#1a2b3c]">لا يوجد غياب اليوم!</h3>
-              <p className="text-gray-400 font-medium">جميع الطلاب حاضرون للاختبارات في التاريخ المحدد.</p>
+              <h3 className="text-2xl font-black text-slate-800">انضباط تام!</h3>
+              <p className="text-slate-400 font-bold">لم يتم رصد أي حالات غياب في اللجان النشطة حتى الآن.</p>
             </div>
-          </>
+          </div>
         ) : (
-          <div className="w-full space-y-4">
-            {absentStudents.map(student => (
-              <div key={student.id} className="bg-red-50/50 border border-red-100 p-6 rounded-[32px] flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-red-500 font-black">!</div>
-                  <div className="text-right">
-                    <p className="font-black text-gray-900">{student.name}</p>
-                    <p className="text-xs text-red-600 font-bold">غائب في لجنة {student.committee} - {student.subject}</p>
+          absentStudents.map(student => (
+            <div key={student.id} className="bg-white p-8 rounded-[40px] border border-red-50 shadow-sm hover:shadow-xl transition-all flex items-center justify-between group overflow-hidden relative">
+              <div className="flex items-center gap-6 relative z-10">
+                <div className="w-20 h-20 bg-red-50 rounded-[32px] flex items-center justify-center text-red-500 font-black text-3xl shadow-inner group-hover:bg-red-500 group-hover:text-white transition-all duration-500">
+                  {student.classroom || student.id.substring(0, 1)}
+                </div>
+                <div className="text-right space-y-1">
+                  <p className="font-black text-slate-800 text-xl leading-none">{student.name}</p>
+                  <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mt-2">رقم الجلوس: <span className="text-red-500">#{student.id}</span></p>
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-3 py-1 rounded-full">لجنة {student.committee}</span>
                   </div>
                 </div>
-                <button className="bg-white p-4 rounded-2xl text-green-600 shadow-sm hover:shadow-md transition">
-                   <PhoneCall className="w-6 h-6" />
-                </button>
               </div>
-            ))}
-          </div>
+              <div className="flex flex-col items-end gap-3 relative z-10">
+                <p className="text-sm font-black text-slate-700 tracking-[0.15em]">{student.phone || 'بدون رقم'}</p>
+                <a 
+                  href={`tel:${student.phone}`} 
+                  className={`flex items-center gap-3 px-6 py-4 rounded-2xl text-white font-black shadow-lg transition transform active:scale-95 ${student.phone ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-200 cursor-not-allowed pointer-events-none text-slate-400'}`}
+                >
+                  <PhoneCall className="w-5 h-5" />
+                  اتصال بولي الأمر
+                </a>
+              </div>
+              <div className="absolute top-0 left-0 w-32 h-32 bg-red-500/5 -translate-x-10 -translate-y-10 rounded-full"></div>
+            </div>
+          ))
         )}
       </div>
     </div>
